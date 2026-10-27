@@ -1,0 +1,16 @@
+.venv/
+venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+frontend/node_modules/
+frontend/dist/
+*.db
+*.db-*
+uploads/
+.env
+.env.*
+!.env.example
+.vercel
+.env*
