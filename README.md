@@ -42,7 +42,9 @@ Set-Location -LiteralPath .\backend
 | Northstar Delivery Platform | Admin | `admin.priya@fairshift.demo` | `AdminPass123!` |
 | Northstar Delivery Platform | Worker | `worker.amina@fairshift.demo` | `WorkerPass123!` |
 
-Public registration is disabled. Organization admins can create worker accounts and sites; role and tenant association are assigned by the backend.
+Public registration is disabled. Organization admins can create worker accounts and sites; role and tenant association are assigned by the backend. To switch demo roles, sign out and authenticate with the other account; the signed-in navbar does not offer a shortcut between users.
+
+These shared demo credentials are for local testing only. Do not seed a production database with the documented demo passwords; configure unique credentials and production secrets before any deployment.
 
 ## Core behavior
 

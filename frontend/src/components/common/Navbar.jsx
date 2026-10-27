@@ -1,9 +1,9 @@
 import React from 'react';
-import { useAuth, DEMO_USERS } from '../../context/AuthContext';
-import { Shield, User, LogOut, ArrowRightLeft, HardHat, Bike } from 'lucide-react';
+import { useAuth } from '../../context/AuthContext';
+import { Shield, LogOut, HardHat, Bike } from 'lucide-react';
 
 export function Navbar() {
-  const { user, logout, switchDemoUser } = useAuth();
+  const { user, logout } = useAuth();
 
   if (!user) return null;
 
@@ -27,37 +27,7 @@ export function Navbar() {
             </div>
           </div>
 
-          {/* User profile & Quick Switcher */}
           <div className="flex items-center space-x-3">
-            {/* Quick Demo Switcher Dropdown */}
-            <div className="relative group">
-              <button
-                className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 border border-slate-700 transition"
-                title="Switch demo role instantly"
-              >
-                <ArrowRightLeft className="w-3.5 h-3.5 text-sky-400" />
-                <span className="hidden md:inline">Switch Demo Role</span>
-              </button>
-              <div className="absolute right-0 mt-1 w-64 bg-slate-800 border border-slate-700 rounded-lg shadow-xl py-1.5 hidden group-hover:block z-50">
-                <div className="px-3 py-1 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-                  Test Personas
-                </div>
-                {DEMO_USERS.map((demo) => (
-                  <button
-                    key={demo.email}
-                    onClick={() => switchDemoUser(demo)}
-                    className={`w-full text-left px-3 py-2 text-xs flex flex-col hover:bg-slate-700 transition ${
-                      user.email === demo.email ? 'bg-sky-950/60 text-sky-300 font-semibold' : 'text-slate-200'
-                    }`}
-                  >
-                    <span>{demo.name}</span>
-                    <span className="text-[10px] text-slate-400">{demo.tag}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Current Role Pill */}
             <div className="flex items-center space-x-2 bg-slate-800/80 px-3 py-1.5 rounded-full border border-slate-700 text-xs">
               {user.industry_sector === 'construction' ? (
                 <HardHat className="w-4 h-4 text-amber-400" />
@@ -72,7 +42,6 @@ export function Navbar() {
               </span>
             </div>
 
-            {/* Logout */}
             <button
               onClick={logout}
               className="p-2 text-slate-400 hover:text-rose-400 hover:bg-slate-800 rounded-lg transition"

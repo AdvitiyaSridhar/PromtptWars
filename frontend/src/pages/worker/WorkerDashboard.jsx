@@ -17,9 +17,9 @@ export function WorkerDashboard({ onNavigateTab }) {
   const [attendanceMode, setAttendanceMode] = useState('check-in');
   const [errorMsg, setErrorMsg] = useState('');
 
-  const loadData = async () => {
+  const loadData = async (showLoading = true) => {
     try {
-      setLoading(true);
+      if (showLoading) setLoading(true);
       setErrorMsg('');
       const [shiftsData, placesData, fatigueData] = await Promise.all([
         api.get('/shifts'),
@@ -32,7 +32,7 @@ export function WorkerDashboard({ onNavigateTab }) {
     } catch (err) {
       setErrorMsg(err.message || 'Failed to load worker dashboard.');
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   };
 
@@ -46,7 +46,7 @@ export function WorkerDashboard({ onNavigateTab }) {
     .sort((a, b) => new Date(a.scheduled_start) - new Date(b.scheduled_start))[0];
 
   const handleCheckinSuccess = async () => {
-    await loadData();
+    await loadData(false);
   };
 
   if (loading) {

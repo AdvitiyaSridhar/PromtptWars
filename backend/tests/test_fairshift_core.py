@@ -136,6 +136,38 @@ def test_valid_shift_creation_and_assignment(client, test_setup_data):
     assert data["worker_id"] == worker.id
 
 
+def test_safe_shift_after_rest_ages_out_of_rolling_window_is_allowed(client, test_setup_data, db_session):
+    admin_headers = test_setup_data["admin_headers"]
+    worker = test_setup_data["worker1"]
+    admin = test_setup_data["admin"]
+    site = test_setup_data["site_alpha"]
+    previous_start = datetime.now(timezone.utc) + timedelta(days=2)
+    previous_end = previous_start + timedelta(hours=8)
+    previous_shift = Shift(
+        worker_id=worker.id,
+        workplace_id=site.id,
+        created_by=admin.id,
+        scheduled_start=previous_start,
+        scheduled_end=previous_end,
+        actual_start=previous_start,
+        actual_end=previous_end,
+        base_hourly_rate=Decimal("25.00"),
+        status="completed",
+    )
+    db_session.add(previous_shift)
+    db_session.commit()
+
+    start = previous_end + timedelta(hours=17)
+    response = client.post("/api/v1/shifts", headers=admin_headers, json={
+        "worker_id": worker.id,
+        "workplace_id": site.id,
+        "scheduled_start": start.isoformat(),
+        "scheduled_end": (start + timedelta(hours=8)).isoformat(),
+    })
+
+    assert response.status_code == 201
+
+
 def test_overlapping_shift_rejected(client, test_setup_data):
     """5. Verify overlapping or conflicting shifts are strictly rejected by the backend."""
     admin_headers = test_setup_data["admin_headers"]
@@ -202,10 +234,41 @@ def test_unsafe_assignment_insufficient_rest_rejected(client, test_setup_data):
     assert "Insufficient rest" in err["reason"]
 
 
+def test_assignment_rejected_when_it_leaves_insufficient_rest_before_next_shift(client, test_setup_data):
+    admin_headers = test_setup_data["admin_headers"]
+    worker = test_setup_data["worker1"]
+    site = test_setup_data["site_alpha"]
+    next_start = datetime.now(timezone.utc) + timedelta(days=10)
+    next_end = next_start + timedelta(hours=8)
+    later_response = client.post("/api/v1/shifts", headers=admin_headers, json={
+        "worker_id": worker.id,
+        "workplace_id": site.id,
+        "scheduled_start": next_start.isoformat(),
+        "scheduled_end": next_end.isoformat(),
+    })
+    assert later_response.status_code == 201
+
+    earlier_end = next_start - timedelta(hours=8)
+    earlier_start = earlier_end - timedelta(hours=8)
+    earlier_response = client.post("/api/v1/shifts", headers=admin_headers, json={
+        "worker_id": worker.id,
+        "workplace_id": site.id,
+        "scheduled_start": earlier_start.isoformat(),
+        "scheduled_end": earlier_end.isoformat(),
+    })
+
+    assert earlier_response.status_code == 422
+    detail = earlier_response.json()["detail"]
+    assert detail["code"] == "FATIGUE_LIMIT_BREACHED"
+    assert detail["breach_type"] == "insufficient_rest"
+    assert "before the next shift" in detail["reason"]
+
+
 def test_qr_checkin_and_checkout_flow(client, test_setup_data, db_session):
     """7, 8, 9, 10. Test full QR attendance flow, invalid token, out-of-window, and duplicate scan."""
     admin_headers = test_setup_data["admin_headers"]
     worker = test_setup_data["worker1"]
+    admin = test_setup_data["admin"]
     worker_headers = test_setup_data["worker1_headers"]
     site = test_setup_data["site_alpha"]
 
@@ -285,6 +348,45 @@ def test_qr_checkin_and_checkout_flow(client, test_setup_data, db_session):
     checkout_data = checkout_resp.json()
     assert checkout_data["status"] == "completed"
     assert checkout_data["duration_hours"] >= 0.0
+
+
+def test_safe_checkin_does_not_double_count_work_aging_out_of_window(client, test_setup_data, db_session):
+    worker = test_setup_data["worker1"]
+    admin = test_setup_data["admin"]
+    worker_headers = test_setup_data["worker1_headers"]
+    admin_headers = test_setup_data["admin_headers"]
+    site = test_setup_data["site_alpha"]
+    checkin_time = datetime.now(timezone.utc)
+    previous_start = checkin_time - timedelta(hours=25)
+    previous_end = checkin_time - timedelta(hours=17)
+    db_session.add(Shift(
+        worker_id=worker.id,
+        workplace_id=site.id,
+        created_by=admin.id,
+        scheduled_start=previous_start,
+        scheduled_end=previous_end,
+        actual_start=previous_start,
+        actual_end=previous_end,
+        base_hourly_rate=Decimal("25.00"),
+        status="completed",
+    ))
+    db_session.commit()
+
+    shift_start = checkin_time - timedelta(minutes=10)
+    shift_end = checkin_time + timedelta(hours=8)
+    shift_response = client.post("/api/v1/shifts", headers=admin_headers, json={
+        "worker_id": worker.id,
+        "workplace_id": site.id,
+        "scheduled_start": shift_start.isoformat(),
+        "scheduled_end": shift_end.isoformat(),
+    })
+    assert shift_response.status_code == 201
+
+    response = client.post("/api/v1/shifts/check-in", headers=worker_headers, json={
+        "scanned_site_token": QRService.generate_site_qr_token(site)
+    })
+    assert response.status_code == 200
+    assert response.json()["success"] is True
 
 
 def test_ledger_net_pay_arithmetic_invariant_and_deductions(client, test_setup_data, db_session):

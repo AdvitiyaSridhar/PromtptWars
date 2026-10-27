@@ -106,6 +106,61 @@ class FatigueGuardService:
         }
 
     @staticmethod
+    def calculate_max_rolling_hours(
+        db: Session,
+        worker_id: str,
+        proposed_start: datetime,
+        proposed_end: datetime,
+        window_hours: int,
+        exclude_shift_id: Optional[str] = None,
+    ) -> float:
+        """Find the maximum work overlapping any rolling window that intersects a proposed shift."""
+        proposed_start = ensure_utc(proposed_start)
+        proposed_end = ensure_utc(proposed_end)
+        window = timedelta(hours=window_hours)
+        earliest_window_start = proposed_start - window
+        latest_window_start = proposed_end
+        shifts = db.query(Shift).filter(
+            Shift.worker_id == worker_id,
+            Shift.status.in_(["scheduled", "completed", "in_progress"]),
+            Shift.scheduled_start < proposed_end + window,
+            Shift.scheduled_end > earliest_window_start,
+        )
+        if exclude_shift_id:
+            shifts = shifts.filter(Shift.id != exclude_shift_id)
+
+        intervals = [(proposed_start, proposed_end)]
+        for shift in shifts.all():
+            shift_start = ensure_utc(shift.actual_start or shift.scheduled_start)
+            shift_end = ensure_utc(shift.actual_end or shift.scheduled_end)
+            if shift_start and shift_end and shift_end > shift_start:
+                intervals.append((shift_start, shift_end))
+
+        candidates = {earliest_window_start, latest_window_start}
+        for interval_start, interval_end in intervals:
+            candidates.update((
+                interval_start,
+                interval_end,
+                interval_start - window,
+                interval_end - window,
+            ))
+
+        max_hours = 0.0
+        for window_start in candidates:
+            if window_start < earliest_window_start or window_start > latest_window_start:
+                continue
+            window_end = window_start + window
+            worked_seconds = sum(
+                max(
+                    0.0,
+                    (min(interval_end, window_end) - max(interval_start, window_start)).total_seconds(),
+                )
+                for interval_start, interval_end in intervals
+            )
+            max_hours = max(max_hours, worked_seconds / 3600.0)
+        return round(max_hours, 2)
+
+    @staticmethod
     def validate_shift_assignment(
         db: Session,
         worker_id: str,
@@ -123,7 +178,6 @@ class FatigueGuardService:
                 detail="Shift end time must be after start time."
             )
 
-        shift_duration = (scheduled_end - scheduled_start).total_seconds() / 3600.0
         policy = FatigueGuardService.get_policy_for_workplace(db, workplace_id)
 
         # 1. Check for overlapping shifts
@@ -211,9 +265,53 @@ class FatigueGuardService:
                     }
                 )
 
+        following_shifts = db.query(Shift).filter(
+            Shift.worker_id == worker_id,
+            Shift.status.in_(["scheduled", "in_progress"]),
+            Shift.scheduled_start >= scheduled_end,
+        )
+        if exclude_shift_id:
+            following_shifts = following_shifts.filter(Shift.id != exclude_shift_id)
+        following_shift = following_shifts.order_by(Shift.scheduled_start.asc()).first()
+        if following_shift:
+            next_start = ensure_utc(following_shift.scheduled_start)
+            rest_gap = (next_start - scheduled_end).total_seconds() / 3600.0
+            if rest_gap < policy.min_rest_hours_between_shifts:
+                rejection_reason = (
+                    f"Insufficient rest before the next shift: Only {round(rest_gap, 1)}h rest between shifts. "
+                    f"Workplace policy '{policy.policy_name}' requires minimum "
+                    f"{policy.min_rest_hours_between_shifts}h rest."
+                )
+                db.add(FatigueExceptionLog(
+                    worker_id=worker_id,
+                    shift_id=None,
+                    workplace_id=workplace_id,
+                    attempted_action="shift_assignment",
+                    breach_type="insufficient_rest",
+                    hours_worked_past_24h=0.0,
+                    rest_hours_elapsed=round(rest_gap, 2),
+                    policy_required_rest=policy.min_rest_hours_between_shifts,
+                    policy_max_daily=policy.max_daily_hours,
+                    rejection_reason=rejection_reason
+                ))
+                db.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={
+                        "code": "FATIGUE_LIMIT_BREACHED",
+                        "breach_type": "insufficient_rest",
+                        "reason": rejection_reason,
+                        "rest_gap_hours": round(rest_gap, 2),
+                        "required_rest_hours": policy.min_rest_hours_between_shifts,
+                        "policy_applied": policy.policy_name
+                    }
+                )
+
         # 3. Check Projected Rolling 24h Hours
         metrics = FatigueGuardService.calculate_rolling_metrics(db, worker_id, scheduled_start)
-        projected_24h = metrics["hours_worked_past_24h"] + shift_duration
+        projected_24h = FatigueGuardService.calculate_max_rolling_hours(
+            db, worker_id, scheduled_start, scheduled_end, 24
+        )
         if projected_24h > policy.max_daily_hours:
             rejection_reason = (
                 f"Daily limit exceeded: Projected {round(projected_24h, 1)}h in rolling 24-hour window exceeds "
@@ -247,7 +345,9 @@ class FatigueGuardService:
             )
 
         # 4. Check Rolling 7d Weekly Hours
-        projected_7d = metrics["hours_worked_past_7d"] + shift_duration
+        projected_7d = FatigueGuardService.calculate_max_rolling_hours(
+            db, worker_id, scheduled_start, scheduled_end, 24 * 7
+        )
         if projected_7d > policy.max_weekly_hours:
             rejection_reason = (
                 f"Weekly limit exceeded: Projected {round(projected_7d, 1)}h in 7 days exceeds "
@@ -335,11 +435,19 @@ class FatigueGuardService:
             )
 
         # 2. Enforce rolling 24h work limit
-        shift_duration = (ensure_utc(shift.scheduled_end) - ensure_utc(shift.scheduled_start)).total_seconds() / 3600.0
-        if metrics["hours_worked_past_24h"] + shift_duration > policy.max_daily_hours:
+        scheduled_end = ensure_utc(shift.scheduled_end)
+        remaining_shift_end = max(checkin_time, scheduled_end)
+        projected_24h = FatigueGuardService.calculate_max_rolling_hours(
+            db, shift.worker_id, checkin_time, remaining_shift_end, 24, exclude_shift_id=shift.id
+        )
+        projected_7d = FatigueGuardService.calculate_max_rolling_hours(
+            db, shift.worker_id, checkin_time, remaining_shift_end, 24 * 7, exclude_shift_id=shift.id
+        )
+        if projected_24h > policy.max_daily_hours:
             rejection_reason = (
                 f"Check-in blocked by FatigueGuard: Worker has already worked {metrics['hours_worked_past_24h']}h in past 24h. "
-                f"Adding this {round(shift_duration, 1)}h shift exceeds the {policy.max_daily_hours}h daily threshold."
+                f"Projected work in a rolling 24-hour window is {projected_24h}h, exceeding the "
+                f"{policy.max_daily_hours}h daily threshold."
             )
             log = FatigueExceptionLog(
                 worker_id=shift.worker_id,
@@ -362,13 +470,13 @@ class FatigueGuardService:
                     "code": "ELIGIBILITY_BLOCKED_FATIGUE",
                     "breach_type": "daily_hours_exceeded",
                     "reason": rejection_reason,
-                    "hours_worked_past_24h": metrics["hours_worked_past_24h"],
+                    "hours_worked_past_24h": projected_24h,
                     "max_daily_hours": policy.max_daily_hours,
                     "policy_applied": policy.policy_name
                 }
             )
 
-        if metrics["hours_worked_past_7d"] + shift_duration > policy.max_weekly_hours:
+        if projected_7d > policy.max_weekly_hours:
             rejection_reason = (
                 f"Check-in blocked by FatigueGuard: The shift would exceed the "
                 f"{policy.max_weekly_hours}h rolling 7-day threshold."
@@ -392,7 +500,7 @@ class FatigueGuardService:
                     "code": "ELIGIBILITY_BLOCKED_FATIGUE",
                     "breach_type": "weekly_hours_exceeded",
                     "reason": rejection_reason,
-                    "hours_worked_past_7d": metrics["hours_worked_past_7d"],
+                    "hours_worked_past_7d": projected_7d,
                     "max_weekly_hours": policy.max_weekly_hours,
                     "policy_applied": policy.policy_name
                 }

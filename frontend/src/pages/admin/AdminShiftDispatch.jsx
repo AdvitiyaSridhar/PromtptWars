@@ -195,7 +195,7 @@ export function AdminShiftDispatch() {
                 className="w-full text-xs p-2.5 bg-slate-50 border border-slate-300 rounded-lg focus:ring-2 focus:ring-sky-500 text-slate-800"
               >
                 {workplaces.map((w) => (
-                  <option key={w.id} value={w.id}>{w.full_name}</option>
+                  <option key={w.id} value={w.id}>{w.name}</option>
                 ))}
               </select>
             </div>
